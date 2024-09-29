@@ -5,12 +5,15 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import CallbackQueryHandler
 from telegram.helpers import escape_markdown
-import requests
 import aiohttp
-from langchain.chains import RetrievalQA
 from langchain.vectorstores import FAISS
 from langchain.embeddings import HuggingFaceEmbeddings
 from uuid import uuid4
+from dotenv import load_dotenv
+import os
+
+# Load environment variables from the .env file
+load_dotenv()
 
 # Initialize logging
 logging.basicConfig(level=logging.INFO)
@@ -21,19 +24,24 @@ user_queries = {}
 
 # Initialize the embedding model (to use with the retriever)
 embedding_model = HuggingFaceEmbeddings(model_name='sentence-transformers/all-MiniLM-L6-v2')
+
 # Load the FAISS vector store
 vector_store = FAISS.load_local("faiss_index", embeddings=embedding_model)
-#print('This works')
+
 # Create a retriever from the vector store
 retriever = vector_store.as_retriever(embedding_model=embedding_model, search_kwargs={"k": 5})
-#print(retriever)
 
-# Telegram bot token
-TELEGRAM_TOKEN = "7828063944:AAHJLgBukbYVIBM-z76avyVpNKoteXBfPDY"
+# Load API keys and tokens from environment variables
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 
 # Google Gemini Flash API configuration
 GEMINI_FLASH_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent"
-GEMINI_API_KEY = "AIzaSyCKab4R5XTuarzUfIHOVckm3jc2sGkdBpY"
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+
+# Discourse API details
+DISCOURSE_URL = "https://dtest.wi0lono.com/posts.json"
+DISCOURSE_API_KEY = os.getenv('DISCOURSE_API_KEY')
+DISCOURSE_USERNAME = os.getenv('DISCOURSE_USERNAME')
 
 # Function to call Google Gemini Flash API
 async def generate_answer_with_gemini_flash(prompt):
@@ -107,7 +115,6 @@ async def get_answer(question):
 
 
 # Handler function for incoming messages
-
 async def handle_message(update: Update, context: CallbackContext):
     user_message = update.message.text
     logger.info(f"Received message from user: {user_message}")
@@ -159,9 +166,10 @@ async def handle_feedback(update: Update, context: CallbackContext):
     if callback_data.startswith('feedback_no'):
         # Get the message_id from the callback data
         message_id = callback_data.split('|', 1)[1]
-        # Retrieve the user's question and answer from the dictionary
+        # Retrieve the user's question, answer, and category from the dictionary
         user_message = user_queries[message_id]['question']
         answer = user_queries[message_id]['answer']
+        category = user_queries[message_id]['category']
 
         # Ask the user if they want to post the question to the community
         keyboard = [
@@ -174,13 +182,13 @@ async def handle_feedback(update: Update, context: CallbackContext):
     elif callback_data.startswith('post_to_community'):
         # Get the message_id from the callback data
         message_id = callback_data.split('|', 1)[1]
-        # Retrieve the user's question and answer from the dictionary
+        # Retrieve the user's question, answer, and category from the dictionary
         user_message = user_queries[message_id]['question']
         answer = user_queries[message_id]['answer']
+        category = user_queries[message_id]['category']
 
         # Post the question and initial answer to Discourse
-        #await post_to_discourse(user_message, answer, category_name)
-        await post_to_discourse(user_message, answer)
+        await post_to_discourse(user_message, answer, category)
 
         # Notify the user
         await query.edit_message_text("Your question has been posted to the community forum.")
@@ -194,14 +202,13 @@ async def handle_feedback(update: Update, context: CallbackContext):
 async def start(update: Update, context: CallbackContext):
     await update.message.reply_text('Hello! Send me a question, and I will provide an answer based on our documents.')
 
-async def post_to_discourse(question, answer):
+
+async def post_to_discourse(question, answer, category_name):
     # Discourse API details
-    discourse_url = "https://dtest.wi0lono.com/posts.json"
-    discourse_api_key = "0208f4bb232be3793ff52c7aacab79e08cb4a9c2ccf0e53fb667cb1858d982b1"
-    discourse_username = "dontcompute"
+    discourse_url = DISCOURSE_URL
     headers = {
-        'Api-Key': discourse_api_key,
-        'Api-Username': discourse_username,
+        'Api-Key': DISCOURSE_API_KEY,
+        'Api-Username': DISCOURSE_USERNAME,
         'Content-Type': 'application/json'
     }
     
@@ -218,21 +225,20 @@ async def post_to_discourse(question, answer):
     }
 
     # Get the category ID based on the classification
-    #category_id = category_id_mapping.get(category_name, 4)  # Default to "General" (ID: 4) if category not found
+    category_id = category_id_mapping.get(category_name, 4)  # Default to "General" (ID: 4) if category not found
 
     # Prepare the data to post
     data = {
         'title': f"User Question: {question[:50]}...",  # Use the first 50 characters of the question as the title
         'raw': f"**Question:** {question}\n\n**Initial Answer:** {answer}",
-        'category': 2 #TODO
+        'category': category_id
     }
     
     # Post to Discourse
     async with aiohttp.ClientSession() as session:
         async with session.post(discourse_url, headers=headers, json=data) as response:
             if response.status == 200:
-                #logger.info(f"Successfully posted to Discourse under category ID {category_id}.")
-                logger.info(f"Succesfully posted to discourse!")
+                logger.info(f"Successfully posted to Discourse under category ID {category_id}.")
             else:
                 logger.error(f"Failed to post to Discourse: {response.status} - {await response.text()}")
 
@@ -240,7 +246,7 @@ async def post_to_discourse(question, answer):
 async def classify_question_with_llm(question):
     # Define the categories and associated keywords for preliminary filtering
     category_keywords = {
-        "Labour law": ["labour", "employment", "workplace", "worker", "salary", "employee", "employer", "boss", "payment", "work", "factory",],
+        "Labour law": ["labour", "employment", "workplace", "worker", "salary", "employee", "employer", "boss", "payment", "work", "factory"],
         "Cyber laws": ["cyber", "internet", "digital", "online", "hacking", "photo", "password", "harassment", "computer", "phone", "data"],
         "Transgender rights": ["transgender", "lgbt", "gender identity", "queer", "trans"],
         "Violence against women": ["violence", "abuse", "domestic", "harassment", "women", "beaten", "hit", "wife", "husband", "in-law", "sexual harassment", "rape"],
@@ -308,6 +314,7 @@ async def classify_question_with_llm(question):
     # Fallback to "General" if classification fails
     return "General"
 
+
 def main():
     # Create the Application
     application = Application.builder().token(TELEGRAM_TOKEN).build()
@@ -326,6 +333,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 import logging
 
 logging.basicConfig(level=logging.INFO)
